@@ -4,16 +4,19 @@ import numpy as np
 from scipy.optimize import minimize
 from moviepy.editor import VideoFileClip
 import config
+import calibration
 
-def pipeline(image, name=None):
+def pipeline(image, mtx, dist, name=None):
 
     if name is None:
         write_images = False
     else:
         write_images = True
 
+    undistort = cv2.undistort(image, mtx, dist, None, mtx)
+
     # convert to HLS color space
-    hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
+    hls = cv2.cvtColor(undistort, cv2.COLOR_BGR2HLS)
 
     def threshold(img, threshold):
         return (img > threshold[0]) & (img < threshold[1])
@@ -52,6 +55,8 @@ def pipeline(image, name=None):
     cv2.fillPoly(mask, [np.array(config.ROAD_REGION)], 255)
     masked_image = cv2.bitwise_and(threshold_img, mask)
 
+
+
     to_top = True
     to_road = False
     def shift(img, direction):
@@ -73,6 +78,7 @@ def pipeline(image, name=None):
 
     overhead_thresholds = shift(masked_image, to_top)
     if write_images:
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_0.png', masked_image)
         cv2.imwrite(config.OUT_DIR + '/' + name + '_1.png', overhead_thresholds)
 
     # get pixel locations
@@ -207,7 +213,6 @@ def pipeline(image, name=None):
 
     row = 450
     if len(p) == 3:
-        # import pdb; pdb.set_trace()
         x = (row - means[0]) / devs[0]
         # coefficients calculated by optimization are produced from
         # optimization on normalized y values.  Need to adjust to
@@ -226,21 +231,19 @@ def pipeline(image, name=None):
 
 
 i = 0
-def process_video(image):
+def process_video(image, mtx, dst):
     global i
-    out = pipeline(image, 'vid_' + str(i))
+    out = pipeline(image, mtx, dst, None)
     i = i + 1
     return out
 
-    
-
-
+mtx, dist = calibration.getCameraCalibration()
 img_files = glob.glob('test_images/*.jpg')
 for fname in img_files:
     name = fname.split('/')[-1].split('.')[0]
     image = cv2.imread(fname)
-    pipeline(image, name)
-clip = VideoFileClip('harder_challenge_video.mp4')
-out_clip = clip.fl_image(process_video)
-out_clip.write_videofile('outvideo_challenge.mp4', fps=10)
+    pipeline(image, mtx, dist, name)
+clip = VideoFileClip('project_video.mp4')
+out_clip = clip.fl_image(lambda frame : process_video(frame, mtx, dist))
+out_clip.write_videofile(config.OUT_DIR + '/' + 'outvideo.mp4', fps=10)
 

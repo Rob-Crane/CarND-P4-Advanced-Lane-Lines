@@ -17,6 +17,7 @@ def getCameraCalibration(draw_images=False):
     for fname in images:
         img = cv2.imread(fname)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cv2.imwrite(config.OUT_DIR + '/' + get_name(fname) + '_gray.jpg', gray)
 
         ret, corners = cv2.findChessboardCorners(gray, (6, 9), None)
 
