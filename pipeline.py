@@ -6,7 +6,9 @@ from moviepy.editor import VideoFileClip
 import config
 import calibration
 
-def pipeline(image, mtx, dist, name=None):
+
+count=0
+def pipeline(image, mtx, dist, name=None, incr=False):
 
     if name is None:
         write_images = False
@@ -14,6 +16,8 @@ def pipeline(image, mtx, dist, name=None):
         write_images = True
 
     undistort = cv2.undistort(image, mtx, dist, None, mtx)
+
+
 
     # convert to HLS color space
     hls = cv2.cvtColor(undistort, cv2.COLOR_BGR2HLS)
@@ -55,8 +59,6 @@ def pipeline(image, mtx, dist, name=None):
     cv2.fillPoly(mask, [np.array(config.ROAD_REGION)], 255)
     masked_image = cv2.bitwise_and(threshold_img, mask)
 
-
-
     to_top = True
     to_road = False
     def shift(img, direction):
@@ -77,9 +79,6 @@ def pipeline(image, mtx, dist, name=None):
         return view
 
     overhead_thresholds = shift(masked_image, to_top)
-    if write_images:
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_0.png', masked_image)
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_1.png', overhead_thresholds)
 
     # get pixel locations
     lane_px = np.argwhere(overhead_thresholds) #row, col
@@ -134,23 +133,43 @@ def pipeline(image, mtx, dist, name=None):
 
         left_y = np.nan_to_num(left_y)
         right_y = np.nan_to_num(right_y)
-        pts = np.int32([list(zip(left_y, draw_x))])
-        pts2 = np.int32([list(zip(right_y, draw_x))])
+        # pts = np.int32([list(zip(left_y, draw_x))])
+        # pts2 = np.int32([list(zip(right_y, draw_x))])
+        # fillpoly needs col, row
 
-        blank_img = np.zeros_like(overhead_thresholds)
-        lines = cv2.polylines(blank_img, pts=pts, isClosed=False, color=1, thickness=2)
-        lines = cv2.polylines(lines, pts=pts2, isClosed=False, color=1, thickness=2)
-        return lines
+        # From Udacity notes, arrange points and create polygon
+        pts_left = np.array([np.transpose(np.vstack([left_y, draw_x]))])
+        pts_right = np.array([np.flipud(np.transpose(np.vstack([right_y, draw_x])))])
+        pts = np.hstack((pts_left, pts_right))
 
-    def overlay(img, line_img):
-        img = np.copy(img)
-        bool_px = line_img != 0
-        if len(img.shape) > 2:
-            img[bool_px]=[0,0,255]
-        else:
-            img[bool_px] = 255
+        blank_channel = np.zeros_like(overhead_thresholds)
+        poly_image = np.dstack([blank_channel, blank_channel, blank_channel])
 
-        return img
+        # Draw the lane onto the warped blank image
+        cv2.fillPoly(poly_image, np.int_([pts]), (0,255, 0))
+
+        # lines = cv2.polylines(blank_img, pts=pts, isClosed=False, color=1, thickness=2)
+        # lines = cv2.polylines(lines, pts=pts2, isClosed=False, color=1, thickness=2)
+        # return lines
+        return poly_image
+
+    # def overlay(img, line_img):
+        # img = np.copy(img)
+        # bool_px = line_img != 0
+        # if len(img.shape) > 2:
+            # img[bool_px]=[0,0,255]
+        # else:
+            # img[bool_px] = 255
+
+        # return img
+
+    def overlay(img, poly_img):
+
+        if len(img.shape) == 2:
+            img = np.dstack([img, img, img])
+
+        result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
+        return result
 
     # random initialization of polynomial coefficients observed to
     # cause bad convergence at local minima, solved by initializing
@@ -185,8 +204,6 @@ def pipeline(image, mtx, dist, name=None):
     p[0], p[1] = y_int, m
 
     initial_lines = overlay(overhead_thresholds, lines_image(p))
-    if write_images:
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_2.png', initial_lines)
     p = minimize(
         lambda p : abs_loss(p,x,y) , 
         p,
@@ -197,19 +214,12 @@ def pipeline(image, mtx, dist, name=None):
     overhead_original = shift(image, to_top)
     overhead_overlay = overlay(overhead_original, fitted_lines)
     lines_shifted = shift(fitted_lines, to_road)
-    lines_overlay = overlay(image, lines_shifted)
-    if write_images:
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_3.png', threshold_overlay)
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_4.png', overhead_overlay)
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_5.png', lines_overlay)
-
+    results_overlay = overlay(image, lines_shifted)
 
     yb_est = get_y_primes(p, np.array([xb]))
     lane_center = (np.mean(yb_est) * devs[1] + means[1]) * 0.048 # get in meters referenced from left
     image_center = (threshold_img.shape[1] / 2) * 0.048
-
     location = image_center - lane_center
-
 
     row = 450
     if len(p) == 3:
@@ -222,12 +232,19 @@ def pipeline(image, mtx, dist, name=None):
         l_or_r = 'L' if location < 0 else 'R'
         curvature = (1 + (2 * A * x + B)**2)**(3/2) / np.abs(2*A)
         img_text = 'Curv: {:.2f}m   Pos: {}{:.2f}'.format(curvature, l_or_r, np.abs(location))
-        text_overlay = cv2.putText(lines_overlay, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-        if write_images:
-            cv2.imwrite(config.OUT_DIR + '/' + name + '_6.png', text_overlay)
-        return text_overlay
-    else:
-        print('Warning: only 3rd degree polynomial supported for curvature calculation')
+        results_overlay = cv2.putText(results_overlay, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+
+    if write_images:
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_0.png', image)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_1.png', undistort)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_2.png', masked_image)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_3.png', overhead_thresholds)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_4.png', initial_lines)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_5.png', threshold_overlay)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_6.png', overhead_overlay)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_7.png', results_overlay)
+
+    return results_overlay
 
 
 i = 0
@@ -243,7 +260,7 @@ for fname in img_files:
     name = fname.split('/')[-1].split('.')[0]
     image = cv2.imread(fname)
     pipeline(image, mtx, dist, name)
-clip = VideoFileClip('project_video.mp4')
-out_clip = clip.fl_image(lambda frame : process_video(frame, mtx, dist))
-out_clip.write_videofile(config.OUT_DIR + '/' + 'outvideo.mp4', fps=10)
+# clip = VideoFileClip('project_video.mp4')
+# out_clip = clip.fl_image(lambda frame : process_video(frame, mtx, dist))
+# out_clip.write_videofile(config.OUT_DIR + '/' + 'outvideo.mp4', fps=10)
 
