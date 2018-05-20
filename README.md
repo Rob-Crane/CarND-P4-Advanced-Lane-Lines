@@ -93,3 +93,5 @@ Three improvements would likely substantially improve performance:
 * Noise/outlier filtering
 * Instead of treating each frame separately, a single frame should apply an update to a function computed in aggregate.
 * Adjust loss function to weight near and mid field more heavily, these pixels are effectively a higher resolution depiction of the roadway and should be given more accord than distant pixels.
+
+A video of this pipeline applied to each frame can be found [here](https://youtu.be/EotoMqSttPk)
