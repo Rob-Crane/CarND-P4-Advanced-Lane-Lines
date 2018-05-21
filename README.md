@@ -8,7 +8,7 @@ The camera calibration pipeline applies a series of OpenCV functions to compute 
 
   1. The images are loaded with `cv2.imread`.
 
-  ![Example Input](images/input.jpg)   
+  ![Example Input](images/cal_input.jpg)   
 
   2.  The images are converted to grayscale using `cv2.cvtColor`.
 
@@ -31,9 +31,16 @@ To observe the location of the fitted lanes on the original picture, an overhead
 
 #### Isolating Lane Pixels
 
-After using the camera calibration values to undistort the image, it is first transformed to the HLS color space using `cv2.cvtColor`.  From an empirical examination of the resulting componets, the lighting and saturation values demonstrate better resiliency to lighting conditions and granular resolution of image features.  The hue component is discarded.  An example of an input image, after distortion correction, is shown here:
+Images of the roadway are taken from a forward facing camera:
 
-  ![Gradients Image](images/input.jpg)
+  ![Distorted Image](images/input_distorted.png)
+
+First, the previously calculated camera calibration values are used to apply a transformation to adjust for camera distortion. The effects of the undistortion are subtle but have noticible effect at the image boundaries:
+
+  ![Undistorted Image](images/input_undistorted.png)
+
+Next, the image is transformed to the HLS color space using `cv2.cvtColor`.  From an empirical examination of the resulting componets, the lighting and saturation values demonstrate better resiliency to lighting conditions and granular resolution of image features.  The hue component is discarded.  An example of an input image, after distortion correction, is shown here:
+
 
 Next, the magnitude and direction of the gradient are computed for both the lighting and saturation components.  These values are thresholded using values chosen by empirical examination.  These thresholded pixels are combined with the following logic:
   ```python
