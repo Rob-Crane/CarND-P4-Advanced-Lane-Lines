@@ -101,21 +101,18 @@ def pipeline(image, mtx, dist, name, video_mode):
 
     x,y = norm_px[:, 0], norm_px[:, 1] 
 
-    # get expected pixel width of lane
-    lane_width = config.LANE_WIDTH / config.REG_DIM[0] * config.OVERHEAD_RECT[0]
-
     # calculates estimated lane positions
-    def get_y_primes(p, x):
+    def get_y_primes(p, l, x):
         (left, right) = (np.zeros(len(x)), np.zeros(len(x)))
         for i in range(len(p)):
             left = left + p[i] * x**i
-            width_norm = lane_width / devs[1]
+            width_norm = l / devs[1]
             right = left + width_norm
 
         return left, right
 
-    def abs_loss(p, x, y, ret_grads=False):
-        left, right = get_y_primes(p, x)
+    def abs_loss(p, l, x, y, ret_grads=False):
+        left, right = get_y_primes(p, l, x)
         deltas = np.array([(y-left), (y-right)]).T
         candidate_losses = np.abs(deltas)
         m = deltas.shape[0]
@@ -126,9 +123,10 @@ def pipeline(image, mtx, dist, name, video_mode):
                                                   # inc/dec in loss
             act_multipliers = np.choose(active_terms, are_pos.T)
 
-            grads = np.zeros((len(x), len(p)))
+            grads = np.zeros((len(x), len(p)+1))
+            grads[:,0] = act_multipliers # (happens to be) gradient of l (learned lane width)
             for i in range(len(p)):
-                grads[:,i] = act_multipliers * x**i
+                grads[:,i+1] = act_multipliers * x**i
 
             return np.sum(grads, axis=0) / m
 
@@ -137,10 +135,10 @@ def pipeline(image, mtx, dist, name, video_mode):
             loss = np.sum(min_losses) / m / 2
             return loss
 
-    def lines_image(p):
+    def lines_image(p,l):
         draw_x = np.arange(0, overhead_thresholds.shape[0]) 
         draw_x_norm = (draw_x - means[0]) / devs[0]
-        left_norm, right_norm = get_y_primes(p, 
+        left_norm, right_norm = get_y_primes(p, l,
                 draw_x_norm)
         left_y = left_norm * devs[1] + means[1]
         right_y = right_norm * devs[1] + means[1]
@@ -168,10 +166,14 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
         return result
+    
 
+    # expected pixel width - this will be a trained parameter
+    lane_width = config.LANE_WIDTH / config.REG_DIM[0] * config.OVERHEAD_RECT[0]
 
     if video_mode and cache.n >  0:
         p = cache.p
+        l = cache.l
     else: # need to initialize p
 
         # random initialization of polynomial coefficients observed to
@@ -184,6 +186,8 @@ def pipeline(image, mtx, dist, name, video_mode):
         top_th_norm = (top_th_px - means[0]) / devs[0]
         top_y = y[x < top_th_norm]
         top_mean = np.mean(top_y)
+        
+
         yt_est = top_mean - lane_width / devs[1] / 2 # est. of left lane at top
 
         bottom_threshold = 0.25 # bottom 25%
@@ -204,14 +208,18 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         p = np.zeros(config.POLY_DEG)
         p[0], p[1] = y_int, m
+        l = lane_width
 
+    trainables = np.concatenate(([l], p))
+    # bounds = [(None, None) for t in trainables]
+    # bounds[0][1] = lane_width
     res = minimize(
-        lambda p : abs_loss(p,x,y) , 
-        p,
-        jac=lambda p : abs_loss(p,x,y,True))
-    p = res.x
+            lambda trainables : abs_loss(trainables[1:],trainables[0],x,y) , 
+        trainables,
+        jac=lambda trainables : abs_loss(trainables[1:],trainables[0],x,y, True))
+    lnew = res.x[0]
+    pnew = res.x[1:]
     loss = res.fun
-
 
     def wavg(old, new):
         old = ( (cache.n-1) / cache.n * old ) + ( 1/cache.n * new )
@@ -219,28 +227,30 @@ def pipeline(image, mtx, dist, name, video_mode):
     if video_mode:
         cache.count = cache.count + 1
         if cache.n == 0:
-            cache.p = p
+            cache.p = pnew
+            cache.l = lnew
             cache.n = cache.n + 1
         else:
             if cache.n < cache.N:
                 cache.n = cache.n + 1
-            wavg(cache.p, p)
+            wavg(cache.p, pnew)
+            wavg(cache.l, lnew)
     
-    poly = lines_image(p) 
+    poly = lines_image(pnew, lnew) 
     poly_bin = overlay(overhead_thresholds, poly) # polygon overlay on binary threshold image
     overhead_original = shift(image, to_top) 
     poly_col = overlay(overhead_original, poly) # polygon overlay on color overhead view
     poly_shifted = shift(poly, to_road)
     poly_orig = overlay(image, poly_shifted) # polygon overlay of original image
     if video_mode:
-        npoly = lines_image(cache.p) # get a view of normalzied poly
+        npoly = lines_image(cache.p, cache.l) # get a view of normalzied poly
         npoly_bin = overlay(overhead_thresholds, npoly) # overhead threshold view of fitted lines (normalized)
         npoly_col = overlay(overhead_original, npoly)
         npoly_shifted = shift(npoly, to_road)
         npoly_orig = overlay(image, npoly_shifted)
 
     bot = (overhead_thresholds.shape[0] - means[0]) / devs[0]
-    yb_est = get_y_primes(p, np.array([bot]))
+    yb_est = get_y_primes(p, l, np.array([bot]))
     lane_center = (np.mean(yb_est) * devs[1] + means[1]) * 0.048 # get in meters referenced from left
     image_center = (threshold_img.shape[1] / 2) * 0.048
     location = image_center - lane_center
@@ -257,9 +267,9 @@ def pipeline(image, mtx, dist, name, video_mode):
         curvature = (1 + (2 * A * x + B)**2)**(3/2) / np.abs(2*A)
         # img_text = '{} Curv: {:.2f}m   Pos: {}{:.2f}'.format(cache.count, curvature, l_or_r, np.abs(location))
         if video_mode:
-            img_text = '{}: P:{} J:{:.2f}'.format(cache.count, p, loss)
+            img_text = '{}: P:{} L:{:.2f} J:{:.2f}'.format(cache.count, pnew, lnew, loss)
         else:
-            img_text = 'P:{} J:{:.2f}'.format(p, res.fun)
+            img_text = 'P:{} L:{:.2f} J:{:.2f}'.format(pnew, lnew, loss)
         results_img = cv2.putText(poly_orig, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
 
@@ -270,6 +280,8 @@ def pipeline(image, mtx, dist, name, video_mode):
         else:
             return image
 
+    if video_mode:
+        name = name + str(cache.count)
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_00.png', scale_img(image))                 # 0: original image
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_01.png', scale_img(undistort))             # 1: camera undistortion
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_02.png', scale_img(masked_image))            # 2: binary threshold image
@@ -279,7 +291,6 @@ def pipeline(image, mtx, dist, name, video_mode):
     cv2.imwrite(config.OUT_DIR + '/' + name + '_07.png', scale_img(poly_col))                # 7: overhead col overlay of fit
     cv2.imwrite(config.OUT_DIR + '/' + name + '_09.png', scale_img(poly_orig))               # 9: original image overlay of fit
     if video_mode:
-        name = name + str(cache.count)
         cv2.imwrite(config.OUT_DIR + '/' + name + '_06.png', scale_img(npoly_bin))               # 6: overhead bin overlay of npoly
         cv2.imwrite(config.OUT_DIR + '/' + name + '_08.png', scale_img(npoly_col))               # 8: overhead col overlay of npoly
         cv2.imwrite(config.OUT_DIR + '/' + name + '_10.png', scale_img(npoly_orig))               # 10: originalimage overlay of npoly
