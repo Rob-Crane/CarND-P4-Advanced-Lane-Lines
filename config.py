@@ -20,5 +20,10 @@ LANE_WIDTH = 3.6 # lane width in meters
 # UNDISTORTED_RECT = (144, 720) # width, height
 OVERHEAD_RECT = (1280, 720) # width, height
 POLY_DEG=3
+N = 3
+
+SCALE = 1.0
 
 IMSCALE = 1.0
+FPS = 10
+VID_NAME = 'outvideo.mp4'

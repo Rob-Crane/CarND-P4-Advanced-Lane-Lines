@@ -6,6 +6,8 @@ from moviepy.editor import VideoFileClip
 import config
 import calibration
 
+np.set_printoptions(precision=2)
+
 class Cache:
     def __init__(self, N):
         self.center = 0.0
@@ -13,6 +15,7 @@ class Cache:
         self.n = 0
         self.N = N
         self.p = np.zeros(config.POLY_DEG)
+        self.count = 0
 
     # wavg = lambda old, new : old = ( (n-1) / n * old ) + ( 1/n * new )
 
@@ -20,17 +23,8 @@ class Cache:
         # if n < N:
             # self.n = self.n + 1
         # Cache.wavg(self.p, p)
-count=0
-
-def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
-
-    if cache is None:
-        cache = Cache(1)
-
-    if name is None:
-        write_images = False
-    else:
-        write_images = True
+cache = Cache(config.N)
+def pipeline(image, mtx, dist, name, video_mode):
 
     undistort = cv2.undistort(image, mtx, dist, None, mtx)
 
@@ -65,6 +59,7 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
     saturation_dir = threshold(direction_gradient(saturation_img),
                             config.SDIR_THRESHOLD)
 
+    # turn boolean values from threhsold into b&w image
     threshold_img = np.uint8(
             (saturation_mag & saturation_dir) | \
             (lighting_mag & lighting_dir)) * 255
@@ -76,23 +71,6 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
 
     to_top = True
     to_road = False
-
-    # def shift(img, direction):
-        # im_h, im_w = img.shape[0], img.shape[1]
-        # reg_w, reg_h = config.UNDISTORTED_RECT
-        # rect = np.array([[im_w/2-reg_w/2, im_h],
-                        # [im_w/2-reg_w/2, im_h-reg_h],
-                        # [im_w/2+reg_w/2, im_h-reg_h],
-                        # [im_w/2+reg_w/2, im_h]],
-                        # dtype=np.float32)
-        # road_region = np.array(config.ROAD_REGION, dtype=np.float32)
-
-        # if direction:
-            # M = cv2.getPerspectiveTransform(road_region, rect)
-        # else:
-            # M = cv2.getPerspectiveTransform(rect, road_region)
-        # view = cv2.warpPerspective(img, M, (im_w, im_h))
-        # return view
 
     def shift(img, direction):
         im_h, im_w = img.shape[0], img.shape[1]
@@ -192,11 +170,10 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
         return result
 
 
-    # p = np.zeros(config.POLY_DEG)
-    # p[0], p[1] = y_int, m
-    p = cache.p
+    if video_mode and cache.n >  0:
+        p = cache.p
+    else: # need to initialize p
 
-    if cache.n == 0:
         # random initialization of polynomial coefficients observed to
         # cause bad convergence at local minima, solved by initializing
         # x^0 and x^1 terms to an approximation of final values and 0
@@ -228,30 +205,39 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
         p = np.zeros(config.POLY_DEG)
         p[0], p[1] = y_int, m
 
-    # initial_lines = overlay(overhead_thresholds, lines_image(p))
-    p = minimize(
+    res = minimize(
         lambda p : abs_loss(p,x,y) , 
         p,
-        jac=lambda p : abs_loss(p,x,y,True)).x
+        jac=lambda p : abs_loss(p,x,y,True))
+    p = res.x
+    loss = res.fun
 
 
     def wavg(old, new):
         old = ( (cache.n-1) / cache.n * old ) + ( 1/cache.n * new )
 
-    if cache.n == 0:
-        cache.p = p
-        cache.n = cache.n + 1
-    else:
-        if cache.n < cache.N:
+    if video_mode:
+        cache.count = cache.count + 1
+        if cache.n == 0:
+            cache.p = p
             cache.n = cache.n + 1
-        wavg(cache.p, p)
-
-    fitted_lines = lines_image(cache.p)
-    threshold_overlay = overlay(overhead_thresholds, fitted_lines)
-    overhead_original = shift(image, to_top)
-    overhead_overlay = overlay(overhead_original, fitted_lines)
-    lines_shifted = shift(fitted_lines, to_road)
-    results_overlay = overlay(image, lines_shifted)
+        else:
+            if cache.n < cache.N:
+                cache.n = cache.n + 1
+            wavg(cache.p, p)
+    
+    poly = lines_image(p) 
+    poly_bin = overlay(overhead_thresholds, poly) # polygon overlay on binary threshold image
+    overhead_original = shift(image, to_top) 
+    poly_col = overlay(overhead_original, poly) # polygon overlay on color overhead view
+    poly_shifted = shift(poly, to_road)
+    poly_orig = overlay(image, poly_shifted) # polygon overlay of original image
+    if video_mode:
+        npoly = lines_image(cache.p) # get a view of normalzied poly
+        npoly_bin = overlay(overhead_thresholds, npoly) # overhead threshold view of fitted lines (normalized)
+        npoly_col = overlay(overhead_original, npoly)
+        npoly_shifted = shift(npoly, to_road)
+        npoly_orig = overlay(image, npoly_shifted)
 
     bot = (overhead_thresholds.shape[0] - means[0]) / devs[0]
     yb_est = get_y_primes(p, np.array([bot]))
@@ -259,9 +245,8 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
     image_center = (threshold_img.shape[1] / 2) * 0.048
     location = image_center - lane_center
 
-    global count
-    row = 450
-    if len(cache.p) == 3:
+    row = 500
+    if len(p) == 3:
         x = (row - means[0]) / devs[0]
         # coefficients calculated by optimization are produced from
         # optimization on normalized y values.  Need to adjust to
@@ -270,39 +255,47 @@ def pipeline(image, mtx, dist, cache=None, name=None, scale=1.0, incr=False):
         B = p[1] * devs[1] / devs[0]
         l_or_r = 'L' if location < 0 else 'R'
         curvature = (1 + (2 * A * x + B)**2)**(3/2) / np.abs(2*A)
-        img_text = '{} Curv: {:.2f}m   Pos: {}{:.2f}'.format(count+1,curvature, l_or_r, np.abs(location))
-        results_overlay = cv2.putText(results_overlay, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+        # img_text = '{} Curv: {:.2f}m   Pos: {}{:.2f}'.format(cache.count, curvature, l_or_r, np.abs(location))
+        if video_mode:
+            img_text = '{}: P:{} J:{:.2f}'.format(cache.count, p, loss)
+        else:
+            img_text = 'P:{} J:{:.2f}'.format(p, res.fun)
+        results_img = cv2.putText(poly_orig, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
-    if write_images:
 
-        scale_img  = lambda image : cv2.resize(image, (0,0), fx=scale, fy=scale) \
-                if scale != 1.0 else image
-        if incr:
-            name = name+str(count)
-            count = count+1
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_0.png', scale_img(image))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_1.png', scale_img(undistort))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_2.png', scale_img(masked_image))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_3.png', scale_img(overhead_thresholds))
-        # cv2.imwrite(config.OUT_DIR + '/' + name + '_4.png', scale_img(initial_lines))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_5.png', scale_img(threshold_overlay))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_6.png', scale_img(overhead_overlay))
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_7.png', scale_img(results_overlay))
+    scale = config.SCALE
+    def scale_img(image):
+        if scale !=1.0:
+            return cv2.resize(image, (0,0), fx=scale, fy=scale)
+        else:
+            return image
 
-    return results_overlay
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_00.png', scale_img(image))                 # 0: original image
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_01.png', scale_img(undistort))             # 1: camera undistortion
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_02.png', scale_img(masked_image))            # 2: binary threshold image
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_03.png', scale_img(overhead_thresholds))     # 3: overhead shift of binary img
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_04.png', scale_img(initial_lines))         # 4: overhead bin overlay of initialized p
+    cv2.imwrite(config.OUT_DIR + '/' + name + '_05.png', scale_img(poly_bin))                # 5: overhead bin overlay of fit
+    cv2.imwrite(config.OUT_DIR + '/' + name + '_07.png', scale_img(poly_col))                # 7: overhead col overlay of fit
+    cv2.imwrite(config.OUT_DIR + '/' + name + '_09.png', scale_img(poly_orig))               # 9: original image overlay of fit
+    if video_mode:
+        name = name + str(cache.count)
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_06.png', scale_img(npoly_bin))               # 6: overhead bin overlay of npoly
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_08.png', scale_img(npoly_col))               # 8: overhead col overlay of npoly
+        cv2.imwrite(config.OUT_DIR + '/' + name + '_10.png', scale_img(npoly_orig))               # 10: originalimage overlay of npoly
 
-def process_video(image, mtx, dst, cache):
-    out = pipeline(image, mtx, dst, cache, 'vid', 1.0, True)
-    return out
 
-cache = Cache(1)
+    return results_img
+
+
 mtx, dist = calibration.getCameraCalibration()
 img_files = glob.glob('test_images/*.jpg')
 for fname in img_files:
     name = fname.split('/')[-1].split('.')[0]
     image = cv2.imread(fname)
-    pipeline(image, mtx, dist, name=name, scale=config.IMSCALE)
+    pipeline(image, mtx, dist, name, False)
+
 clip = VideoFileClip('project_video.mp4')
-out_clip = clip.fl_image(lambda frame : process_video(frame, mtx, dist, cache))
-out_clip.write_videofile(config.OUT_DIR + '/' + 'outvideo.mp4', fps=2)
+out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True))
+out_clip.write_videofile(config.OUT_DIR + '/' + config.VID_NAME, config.FPS)
 
