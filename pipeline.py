@@ -111,28 +111,94 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         return left, right
 
+    # get a linear estimate down the centerline of the data
+    top_threshold = 0.25 # top 25% of image to average
+    top_th_px = overhead_thresholds.shape[0]*top_threshold
+    top_th_norm = (top_th_px - means[0]) / devs[0]
+    top_y = y[x < top_th_norm]
+    top_mean = np.mean(top_y)
+    
+
+    # yt_est = top_mean - lane_width / devs[1] / 2 # est. of left lane at top
+
+    bottom_threshold = 0.25 # bottom 25%
+    bot_th_px = overhead_thresholds.shape[0]*(1-bottom_threshold)
+    bot_th_norm = (bot_th_px - means[0]) / devs[0]
+    bot_y = y[x > bot_th_norm]
+    bot_mean = np.mean(bot_y)
+    # yb_est = bot_mean - lane_width / devs[1] / 2
+
+    # put those estimates at the top and bottom of image
+    xt = -devs[0] / means[0]
+    xb = (overhead_thresholds.shape[0] - means[0]) / devs[0]
+
+    # slope
+    # m = (yb_est - yt_est) / (xb - xt)
+    m = (bot_mean - top_mean) / (xb - xt)
+    # y-intercept
+    y_int = m*(-xt) + top_mean
+
+
+    # begin draw debug
+
+    draw_x = np.arange(0, overhead_thresholds.shape[0]) 
+    draw_x_norm = (draw_x - means[0]) / devs[0]
+    y_norm = m*draw_x_norm + y_int
+    draw_y = y_norm * devs[1] + means[1]
+
+    draw_y = np.nan_to_num(draw_y)
+
+    # From Udacity notes, arrange points and create polygon
+    pts = np.array([np.transpose(np.vstack([draw_y, draw_x]))])
+
+    blank_channel = np.zeros_like(overhead_thresholds)
+    line_image = np.dstack([blank_channel, blank_channel, blank_channel])
+
+    # Draw the lane onto the warped blank image
+    cv2.polylines(line_image, np.int_([pts]), False, (0,0,255), thickness=2)
+    def overlay(img, poly_img):
+
+        if len(img.shape) == 2:
+            img = np.dstack([img, img, img])
+
+        result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
+        return result
+    line_bin = overlay(overhead_thresholds, line_image) # polygon overlay on binary threshold image
+    cv2.imwrite(config.OUT_DIR + '/' + name + '_033.png', line_bin)                # 5: overhead bin overlay of fit
+
+    # end draw debug
+
     def abs_loss(p, l, x, y, ret_grads=False):
+
         left, right = get_y_primes(p, l, x)
         deltas = np.array([(y-left), (y-right)]).T
         candidate_losses = np.abs(deltas)
-        m = deltas.shape[0]
 
+        avg = m*x + y_int
+        eligible_lane = np.array(y > avg)
+        minimum_lane = candidate_losses.argmin(axis=1)
+        # following produces mask thats true for points in correct region and
+        # that are closer to that lane's fit line
+        region_mask = np.logical_not(np.logical_xor(eligible_lane, minimum_lane))
+    
+        M = deltas.shape[0]
         if ret_grads: # returning gradients
-            active_terms = candidate_losses.argmin(axis=1)
-            are_pos = np.where(deltas > 0, -1, 1) # when loss term is pos/neg -> linear
-                                                  # inc/dec in loss
-            act_multipliers = np.choose(active_terms, are_pos.T)
+            grad_multipliers = np.where(deltas > 0, -1, 1) # when loss term is pos/neg -> linear
+                                                          # inc/dec in loss
+            closer_multiplier = np.choose(minimum_lane, grad_multipliers.T)
+            active_multiplier = closer_multiplier[region_mask]
 
-            grads = np.zeros((len(x), len(p)+1))
-            grads[:,0] = act_multipliers # (happens to be) gradient of l (learned lane width)
+            partial_grads = np.zeros((len(active_multiplier), len(p)+1))
+            partial_grads[:,0] = active_multiplier # (happens to be) gradient of l (learned lane width)
             for i in range(len(p)):
-                grads[:,i+1] = act_multipliers * x**i
+                partial_grads[:,i+1] = active_multiplier * x[region_mask]**i
 
-            return np.sum(grads, axis=0) / m
+            return np.sum(partial_grads, axis=0) / M
 
         else: # just return total loss
-            min_losses = candidate_losses.min(axis=1)
-            loss = np.sum(min_losses) / m / 2
+            min_losses = np.choose(minimum_lane, candidate_losses.T)
+            eligible_losses = min_losses[region_mask]
+            loss = np.sum(min_losses) / M / 2
             return loss
 
     def lines_image(p,l):
@@ -159,13 +225,7 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         return poly_image
 
-    def overlay(img, poly_img):
-
-        if len(img.shape) == 2:
-            img = np.dstack([img, img, img])
-
-        result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
-        return result
+    # overlay goes here
     
 
     # expected pixel width - this will be a trained parameter
@@ -181,33 +241,10 @@ def pipeline(image, mtx, dist, name, video_mode):
         # x^0 and x^1 terms to an approximation of final values and 0
         # for higher order terms
 
-        top_threshold = 0.25 # top 25% of image to average
-        top_th_px = overhead_thresholds.shape[0]*top_threshold
-        top_th_norm = (top_th_px - means[0]) / devs[0]
-        top_y = y[x < top_th_norm]
-        top_mean = np.mean(top_y)
-        
-
-        yt_est = top_mean - lane_width / devs[1] / 2 # est. of left lane at top
-
-        bottom_threshold = 0.25 # bottom 25%
-        bot_th_px = overhead_thresholds.shape[0]*(1-bottom_threshold)
-        bot_th_norm = (bot_th_px - means[0]) / devs[0]
-        bot_y = y[x > bot_th_norm]
-        bot_mean = np.mean(bot_y)
-        yb_est = bot_mean - lane_width / devs[1] / 2
-
-        # put those estimates at the top and bottom of image
-        xt = -devs[0] / means[0]
-        xb = (overhead_thresholds.shape[0] - means[0]) / devs[0]
-
-        # slope
-        m = (yb_est - yt_est) / (xb - xt)
-        # y-intercept
-        y_int = m*(-xt) + yt_est
-
         p = np.zeros(config.POLY_DEG)
-        p[0], p[1] = y_int, m
+        # p[0], p[1] = y_int, m
+        p[0] = y_int - lane_width / devs[1] / 2 #shift centerline to left
+        p[1] = m
         l = lane_width
 
     trainables = np.concatenate(([l], p))
@@ -285,7 +322,7 @@ def pipeline(image, mtx, dist, name, video_mode):
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_00.png', scale_img(image))                 # 0: original image
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_01.png', scale_img(undistort))             # 1: camera undistortion
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_02.png', scale_img(masked_image))            # 2: binary threshold image
-    # cv2.imwrite(config.OUT_DIR + '/' + name + '_03.png', scale_img(overhead_thresholds))     # 3: overhead shift of binary img
+    cv2.imwrite(config.OUT_DIR + '/' + name + '_03.png', scale_img(overhead_thresholds))     # 3: overhead shift of binary img
     # cv2.imwrite(config.OUT_DIR + '/' + name + '_04.png', scale_img(initial_lines))         # 4: overhead bin overlay of initialized p
     cv2.imwrite(config.OUT_DIR + '/' + name + '_05.png', scale_img(poly_bin))                # 5: overhead bin overlay of fit
     cv2.imwrite(config.OUT_DIR + '/' + name + '_07.png', scale_img(poly_col))                # 7: overhead col overlay of fit
@@ -306,7 +343,7 @@ for fname in img_files:
     image = cv2.imread(fname)
     pipeline(image, mtx, dist, name, False)
 
-clip = VideoFileClip('project_video.mp4')
-out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True))
-out_clip.write_videofile(config.OUT_DIR + '/' + config.VID_NAME, config.FPS)
+# clip = VideoFileClip('project_video.mp4')
+# out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True))
+# out_clip.write_videofile(config.OUT_DIR + '/' + config.VID_NAME, config.FPS)
 
