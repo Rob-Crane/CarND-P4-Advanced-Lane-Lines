@@ -66,15 +66,17 @@ Once the source and destination rectangles are defined, the transformation matri
 
 Before fitting, he locations of the pixels are first normalized by taking the Z-score of their X and Y locations.  That is, they are zero-centered by subtracting the mean and then normalized by dividing the standard deviation.  This is applied separtely in the X and Y dimensions.
 
-The lane line location is estimated from the candidate pixels by fitting two polynomial lines.  The row value is treated as the independent variable and the column position is estimated by the regression.  A single set of polynomial coefficients is used to calculate the estimated left lane position.  The right-lane position is then estimated by simply adding the approximate lane width (appropriately scaled).
+The lane line location is estimated from the candidate pixels by fitting two polynomial lines.  The row value is treated as the independent variable and the column position is estimated by the regression.  A single set of polynomial coefficients is used to calculate the estimated left lane position.  In addition to the polynomial coefficients, the lane width is also a trained variable initialized to an approximated value.
 
 To fit the lines, L1 loss is computed for each candidate pixel.  Each pixel is compared against the estimated left and right lane line positions.  Only the smaller distance is included.  L1 loss was chosen to decrease the effects of outliers (compared squared loss) since actual lane lines are expected to be strongly collinear.
+
+Frames with poor lane markings on one side causes problems where the line fit for that side would be stronly influenced by points present for the oppsite lane marker.  To address these errors, an additional mask was applied which bisected the image.  Only pixels present in the left or right half could influence the lane marker on that side.
 
 Trial runs showed a tendency towards convergence at local minima, for example with the left lane fitted to right lane pixels:
 
   ![Local Minima Convergence](images/bad_convergence.png)
 
-To overcome this, initial values for the linear and bias terms are computed using a simple algebraic computation.  The mean column locations in the top and bottom 25% of the image are offset by half a lane width. Then a line is fitted to these offset locations using algebra.  The resulting slope and intercept are used as the first and second values of the polynomial coefficients.  Higher order coefficients are initialized to zero.
+Various initialization schemes were attempted before settling on a simple scheme.  The zero-order (constant) polynomial term and lane width were initialized to an approximate value based on the esimated lane width and and assumption that the camera was near the middle of the lane.  Higher order terms were initialized to zero.  Graphically this initiailizes the fit to two vertical lines centered in the image and offset by the expected lane width.
 
   ![Initialization](images/initialized.png)
 

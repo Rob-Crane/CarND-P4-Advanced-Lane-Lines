@@ -1,4 +1,7 @@
+import os
+import csv
 import glob
+from collections import deque
 import cv2
 import numpy as np
 from scipy.optimize import minimize
@@ -6,25 +9,50 @@ from moviepy.editor import VideoFileClip
 import config
 import calibration
 
-np.set_printoptions(precision=2)
+np.set_printoptions(precision=config.PRINT_PREC)
+
+out_dir = config.OUT_DIR + '/' + config.OUTPUT_NAME
+os.mkdir(out_dir)
 
 class Cache:
-    def __init__(self, N):
-        self.center = 0.0
-        self.radius = 0.0
-        self.n = 0
-        self.N = N
-        self.p = np.zeros(config.POLY_DEG)
+
+    def __init__(self):
         self.count = 0
+        buff_shape = (config.N, config.POLY_DEG + 1)
+        self.buffer = np.zeros(shape=buff_shape)
 
-    # wavg = lambda old, new : old = ( (n-1) / n * old ) + ( 1/n * new )
+    def update_fit(self,l, p):
 
-    # def update_p(self, p):
-        # if n < N:
-            # self.n = self.n + 1
-        # Cache.wavg(self.p, p)
-cache = Cache(config.N)
-def pipeline(image, mtx, dist, name, video_mode):
+        row = self.count%config.N
+        if self.count > 0:
+            diff = np.abs((p - self.p) / self.p)
+            if np.any(diff > config.MAX_DIFF):
+                update = False
+            else:
+                update = True
+        else:
+            update = True
+
+        if update:
+            self.buffer[row][0] = l
+            self.buffer[row][1:] = p
+        else:
+            self.buffer[row][0] = self.l
+            self.buffer[row][1:] = self.p
+
+        self.count = self.count + 1
+
+        if self.count <= config.N:
+            avg = self.buffer[0:self.count].mean(axis=0)
+        else:
+            avg = self.buffer.mean(axis=0)
+
+        self.l = avg[0]
+        self.p = avg[1:]
+        return self.l, self.p
+
+cache = Cache()
+def pipeline(image, mtx, dist, name, video_mode=False, logger=None):
 
     undistort = cv2.undistort(image, mtx, dist, None, mtx)
 
@@ -111,60 +139,8 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         return left, right
 
-    # get a linear estimate down the centerline of the data
-    top_threshold = 0.25 # top 25% of image to average
-    top_th_px = overhead_thresholds.shape[0]*top_threshold
-    top_th_norm = (top_th_px - means[0]) / devs[0]
-    top_y = y[x < top_th_norm]
-    top_mean = np.mean(top_y)
-    
-
-    # yt_est = top_mean - lane_width / devs[1] / 2 # est. of left lane at top
-
-    bottom_threshold = 0.25 # bottom 25%
-    bot_th_px = overhead_thresholds.shape[0]*(1-bottom_threshold)
-    bot_th_norm = (bot_th_px - means[0]) / devs[0]
-    bot_y = y[x > bot_th_norm]
-    bot_mean = np.mean(bot_y)
-    # yb_est = bot_mean - lane_width / devs[1] / 2
-
-    # put those estimates at the top and bottom of image
-    xt = -devs[0] / means[0]
-    xb = (overhead_thresholds.shape[0] - means[0]) / devs[0]
-
-    # slope
-    # m = (yb_est - yt_est) / (xb - xt)
-    m = (bot_mean - top_mean) / (xb - xt)
-    # y-intercept
-    y_int = m*(-xt) + top_mean
-
-
-    # begin draw debug
-
-    draw_x = np.arange(0, overhead_thresholds.shape[0]) 
-    draw_x_norm = (draw_x - means[0]) / devs[0]
-    y_norm = m*draw_x_norm + y_int
-    draw_y = y_norm * devs[1] + means[1]
-
-    draw_y = np.nan_to_num(draw_y)
-
-    # From Udacity notes, arrange points and create polygon
-    pts = np.array([np.transpose(np.vstack([draw_y, draw_x]))])
-
-    blank_channel = np.zeros_like(overhead_thresholds)
-    line_image = np.dstack([blank_channel, blank_channel, blank_channel])
-
-    # Draw the lane onto the warped blank image
-    cv2.polylines(line_image, np.int_([pts]), False, (0,0,255), thickness=2)
-    def overlay(img, poly_img):
-
-        if len(img.shape) == 2:
-            img = np.dstack([img, img, img])
-
-        result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
-        return result
-    line_bin = overlay(overhead_thresholds, line_image) # polygon overlay on binary threshold image
-    cv2.imwrite(config.OUT_DIR + '/' + name + '_033.png', line_bin)                # 5: overhead bin overlay of fit
+    # line_bin = overlay(overhead_thresholds, line_image) # polygon overlay on binary threshold image
+    # cv2.imwrite(config.OUT_DIR + '/' + name + '_033.png', line_bin)                # 5: overhead bin overlay of fit
 
     # end draw debug
 
@@ -174,8 +150,9 @@ def pipeline(image, mtx, dist, name, video_mode):
         deltas = np.array([(y-left), (y-right)]).T
         candidate_losses = np.abs(deltas)
 
-        avg = m*x + y_int
-        eligible_lane = np.array(y > avg)
+        # avg = m*x + y_int
+        # eligible_lane = np.array(y > avg)
+        eligible_lane = np.array(y > overhead_thresholds.shape[1]/2/devs[1])
         minimum_lane = candidate_losses.argmin(axis=1)
         # following produces mask thats true for points in correct region and
         # that are closer to that lane's fit line
@@ -225,31 +202,31 @@ def pipeline(image, mtx, dist, name, video_mode):
 
         return poly_image
 
-    # overlay goes here
+    def overlay(img, poly_img):
+
+        if len(img.shape) == 2:
+            img = np.dstack([img, img, img])
+
+        result = cv2.addWeighted(img, 1, poly_img, 0.3, 0)
+        return result
     
 
     # expected pixel width - this will be a trained parameter
     lane_width = config.LANE_WIDTH / config.REG_DIM[0] * config.OVERHEAD_RECT[0]
 
-    if video_mode and cache.n >  0:
+    if video_mode and cache.count >  0:
         p = cache.p
         l = cache.l
     else: # need to initialize p
 
-        # random initialization of polynomial coefficients observed to
-        # cause bad convergence at local minima, solved by initializing
-        # x^0 and x^1 terms to an approximation of final values and 0
-        # for higher order terms
-
         p = np.zeros(config.POLY_DEG)
-        # p[0], p[1] = y_int, m
-        p[0] = y_int - lane_width / devs[1] / 2 #shift centerline to left
-        p[1] = m
+        p[0] = -lane_width / devs[1]/2 # roughly place left lane line
         l = lane_width
 
+    ipoly = lines_image(p, l )
+    ipoly_bin = overlay(overhead_thresholds, ipoly) # polygon overlay on binary threshold image
+
     trainables = np.concatenate(([l], p))
-    # bounds = [(None, None) for t in trainables]
-    # bounds[0][1] = lane_width
     res = minimize(
             lambda trainables : abs_loss(trainables[1:],trainables[0],x,y) , 
         trainables,
@@ -258,20 +235,23 @@ def pipeline(image, mtx, dist, name, video_mode):
     pnew = res.x[1:]
     loss = res.fun
 
-    def wavg(old, new):
-        old = ( (cache.n-1) / cache.n * old ) + ( 1/cache.n * new )
-
     if video_mode:
-        cache.count = cache.count + 1
-        if cache.n == 0:
-            cache.p = pnew
-            cache.l = lnew
-            cache.n = cache.n + 1
-        else:
-            if cache.n < cache.N:
-                cache.n = cache.n + 1
-            wavg(cache.p, pnew)
-            wavg(cache.l, lnew)
+        cache.update_fit(lnew, pnew)
+        if logger is not None:
+            if cache.count == 1:
+                logger.writerow(
+                        ['count', 'loss', 
+                        'lnew', 'cache.l',
+                        'pnew[0]', 'cache.p[0]',
+                        'pnew[1]', 'cache.p[1]',
+                        'pnew[2]', 'cache.p[2]'])
+
+            logger.writerow(
+                [cache.count, loss, 
+                lnew, cache.l,
+                pnew[0], cache.p[0],
+                pnew[1], cache.p[1],
+                pnew[2], cache.p[2]])
     
     poly = lines_image(pnew, lnew) 
     poly_bin = overlay(overhead_thresholds, poly) # polygon overlay on binary threshold image
@@ -288,27 +268,36 @@ def pipeline(image, mtx, dist, name, video_mode):
 
     bot = (overhead_thresholds.shape[0] - means[0]) / devs[0]
     yb_est = get_y_primes(p, l, np.array([bot]))
-    lane_center = (np.mean(yb_est) * devs[1] + means[1]) * 0.048 # get in meters referenced from left
-    image_center = (threshold_img.shape[1] / 2) * 0.048
-    location = image_center - lane_center
+    lane_center = (np.mean(yb_est) * devs[1] + means[1])
+    image_center = (threshold_img.shape[1] / 2)
+    location = (image_center - lane_center) * 0.0054  # approx. scale from pixels to meters
 
     row = 500
     if len(p) == 3:
-        x = (row - means[0]) / devs[0]
+        x = (row - means[0])
         # coefficients calculated by optimization are produced from
         # optimization on normalized y values.  Need to adjust to
         # produce output in meters
-        A = p[2] * devs[1] / devs[0]**2 / (config.LANE_WIDTH / lane_width)
-        B = p[1] * devs[1] / devs[0]
-        l_or_r = 'L' if location < 0 else 'R'
-        curvature = (1 + (2 * A * x + B)**2)**(3/2) / np.abs(2*A)
+        if video_mode:
+            p, l = cache.p, cache.l
+        else:
+            p, l = pnew, lnew
+
+        A = p[2] * (144/1280) * devs[1] / devs[0]**2 # scale coefficients to pixel scale
+        B = p[1] * (144/1280) * devs[1] / devs[0]
+
+        px_curv = (1 + (2 * A * x + B)**2)**(3/2) / np.abs(2*A) # curvature value is in pixels
+        curvature = px_curv * 0.048 # scale to meters (width compressed in this scale)
+        width = l * 0.0054
+        loc_str = "{:.2f}L".format(-location) if location < 0 else "{:.2f}R".format(location)
         # img_text = '{} Curv: {:.2f}m   Pos: {}{:.2f}'.format(cache.count, curvature, l_or_r, np.abs(location))
         if video_mode:
-            img_text = '{}: P:{} L:{:.2f} J:{:.2f}'.format(cache.count, pnew, lnew, loss)
+            img_text = '{}: Pos:{} Width:{:.2f} Curv:{:.2f}'.format(cache.count, loc_str, width, curvature)
+            img = npoly_orig
         else:
-            img_text = 'P:{} L:{:.2f} J:{:.2f}'.format(pnew, lnew, loss)
-        results_img = cv2.putText(poly_orig, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
-
+            img_text = 'Pos:{} Width:{:.2f} Curv:{:.2f}'.format(loc_str, width, curvature)
+            img = poly_orig
+        results_img = cv2.putText(img, img_text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
 
     scale = config.SCALE
     def scale_img(image):
@@ -319,18 +308,18 @@ def pipeline(image, mtx, dist, name, video_mode):
 
     if video_mode:
         name = name + str(cache.count)
-    # cv2.imwrite(config.OUT_DIR + '/' + name + '_00.png', scale_img(image))                 # 0: original image
-    # cv2.imwrite(config.OUT_DIR + '/' + name + '_01.png', scale_img(undistort))             # 1: camera undistortion
-    # cv2.imwrite(config.OUT_DIR + '/' + name + '_02.png', scale_img(masked_image))            # 2: binary threshold image
-    cv2.imwrite(config.OUT_DIR + '/' + name + '_03.png', scale_img(overhead_thresholds))     # 3: overhead shift of binary img
-    # cv2.imwrite(config.OUT_DIR + '/' + name + '_04.png', scale_img(initial_lines))         # 4: overhead bin overlay of initialized p
-    cv2.imwrite(config.OUT_DIR + '/' + name + '_05.png', scale_img(poly_bin))                # 5: overhead bin overlay of fit
-    cv2.imwrite(config.OUT_DIR + '/' + name + '_07.png', scale_img(poly_col))                # 7: overhead col overlay of fit
-    cv2.imwrite(config.OUT_DIR + '/' + name + '_09.png', scale_img(poly_orig))               # 9: original image overlay of fit
+    cv2.imwrite(out_dir + '/' + name + '_00.png', scale_img(image))                 # 0: original image
+    cv2.imwrite(out_dir + '/' + name + '_01.png', scale_img(undistort))             # 1: camera undistortion
+    cv2.imwrite(out_dir + '/' + name + '_02.png', scale_img(masked_image))            # 2: binary threshold image
+    cv2.imwrite(out_dir + '/' + name + '_03.png', scale_img(overhead_thresholds))     # 3: overhead shift of binary img
+    cv2.imwrite(out_dir + '/' + name + '_04.png', scale_img(ipoly_bin))         # 4: overhead bin overlay of initialized p
+    cv2.imwrite(out_dir + '/' + name + '_05.png', scale_img(poly_bin))                # 5: overhead bin overlay of fit
+    cv2.imwrite(out_dir + '/' + name + '_07.png', scale_img(poly_col))                # 7: overhead col overlay of fit
+    cv2.imwrite(out_dir + '/' + name + '_09.png', scale_img(poly_orig))               # 9: original image overlay of fit
     if video_mode:
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_06.png', scale_img(npoly_bin))               # 6: overhead bin overlay of npoly
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_08.png', scale_img(npoly_col))               # 8: overhead col overlay of npoly
-        cv2.imwrite(config.OUT_DIR + '/' + name + '_10.png', scale_img(npoly_orig))               # 10: originalimage overlay of npoly
+        cv2.imwrite(out_dir + '/' + name + '_06.png', scale_img(npoly_bin))               # 6: overhead bin overlay of npoly
+        cv2.imwrite(out_dir + '/' + name + '_08.png', scale_img(npoly_col))               # 8: overhead col overlay of npoly
+        cv2.imwrite(out_dir + '/' + name + '_10.png', scale_img(npoly_orig))               # 10: originalimage overlay of npoly
 
 
     return results_img
@@ -341,9 +330,13 @@ img_files = glob.glob('test_images/*.jpg')
 for fname in img_files:
     name = fname.split('/')[-1].split('.')[0]
     image = cv2.imread(fname)
-    pipeline(image, mtx, dist, name, False)
+    pipeline(image, mtx, dist, name)
+
+# logfname = out_dir + '/' + config.OUTPUT_NAME + '.csv'
+# logfile = open(logfname, 'w', newline='')
+# logger = csv.writer(logfile)
 
 # clip = VideoFileClip('project_video.mp4')
-# out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True))
-# out_clip.write_videofile(config.OUT_DIR + '/' + config.VID_NAME, config.FPS)
+# out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True, logger))
+# out_clip.write_videofile(out_dir + '/' + config.OUTPUT_NAME + '.mp4', config.FPS)
 
