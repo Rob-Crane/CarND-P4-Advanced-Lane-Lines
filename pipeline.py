@@ -332,11 +332,11 @@ for fname in img_files:
     image = cv2.imread(fname)
     pipeline(image, mtx, dist, name)
 
-# logfname = out_dir + '/' + config.OUTPUT_NAME + '.csv'
-# logfile = open(logfname, 'w', newline='')
-# logger = csv.writer(logfile)
+logfname = out_dir + '/' + config.OUTPUT_NAME + '.csv'
+logfile = open(logfname, 'w', newline='')
+logger = csv.writer(logfile)
 
-# clip = VideoFileClip('project_video.mp4')
-# out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True, logger))
-# out_clip.write_videofile(out_dir + '/' + config.OUTPUT_NAME + '.mp4', config.FPS)
+clip = VideoFileClip('project_video.mp4')
+out_clip = clip.fl_image(lambda frame : pipeline(frame, mtx, dist, 'vid', True, logger))
+out_clip.write_videofile(out_dir + '/' + config.OUTPUT_NAME + '.mp4', config.FPS)
 
